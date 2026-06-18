@@ -137,6 +137,10 @@
   const canvas = document.getElementById('c');
   const ctx = canvas.getContext('2d');
   const W = 800, H = 500;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+  ctx.scale(dpr, dpr);
 
   // ── Tunable model constants (validated for gen-6 takeover & journal counts) ──
   const GEN_PERIOD   = 10;    // seconds per generation at 1x
