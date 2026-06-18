@@ -1,0 +1,855 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Forces: Tug of War and Motion</title>
+  <!-- Original AoPS interactive. Replaces the third-party "Forces and Motion: Basics" simulation. -->
+<script>
+// EigenNode auto-height v2.4
+(function() {
+  // 4px buffer for subpixel rounding + parent's >=3px noise threshold.
+  // Extra 18px when horizontal overflow forces a scrollbar (eats vertical
+  // space inside the iframe — AoPS classroom embeds in a narrower column
+  // than the 600px content, so a horizontal scrollbar appears and steals
+  // ~10-17px of height). Without this, the iframe ends up ~11-15px short.
+  var BUFFER = 4;
+  var H_SCROLLBAR = 18;
+  var measuring = false;
+  function measure() {
+    if (measuring) return 0;
+    var b = document.body, h = document.documentElement;
+    if (!b) return 0;
+    measuring = true;
+    // Temporarily neutralise body's height/min-height (overriding stylesheet
+    // rules with !important) so scrollHeight reflects actual content extent.
+    // Without this, patterns like body { height: 100vh } cause scrollHeight
+    // to echo the iframe's current viewport — adding BUFFER each cycle
+    // ratchets the iframe taller forever. Browser doesn't paint until this
+    // synchronous block returns, so no visible flicker.
+    var hOld = b.style.height, hPri = b.style.getPropertyPriority('height');
+    var mOld = b.style.minHeight, mPri = b.style.getPropertyPriority('min-height');
+    b.style.setProperty('height', 'auto', 'important');
+    b.style.setProperty('min-height', '0', 'important');
+    var content = b.scrollHeight || 0;
+    if (hOld) b.style.setProperty('height', hOld, hPri); else b.style.removeProperty('height');
+    if (mOld) b.style.setProperty('min-height', mOld, mPri); else b.style.removeProperty('min-height');
+    measuring = false;
+    // Check the documentElement only — that's the element that owns the
+    // iframe's horizontal scrollbar. Body can be narrower than the iframe
+    // (e.g. body{width:600px} centered in a 700px iframe) and have its own
+    // 1-2px overflow that doesn't actually trigger a scrollbar.
+    var hOverflow = h && (h.scrollWidth - h.clientWidth) >= 4;
+    return Math.ceil(content) + BUFFER + (hOverflow ? H_SCROLLBAR : 0);
+  }
+  var last = 0;
+  function report() {
+    var h = measure();
+    if (h > 0 && Math.abs(h - last) >= 2) {
+      last = h;
+      window.parent.postMessage({ type: 'resize', height: h }, '*');
+    }
+  }
+  window.addEventListener('load', report);
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(report);
+  if (window.ResizeObserver && document.body) new ResizeObserver(report).observe(document.body);
+})();
+</script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 800px; height: 500px; overflow: hidden;
+      background: #f5f5f5;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      user-select: none;
+    }
+    canvas { display: block; touch-action: none; }
+    #tabs {
+      width: 800px; height: 40px; display: flex; gap: 8px;
+      align-items: center; padding: 0 10px;
+      background: #e4e8ee; border-top: 1px solid #c8cfd8;
+    }
+    .tab {
+      padding: 5px 26px; font: 600 14px 'Segoe UI', system-ui, sans-serif;
+      color: #46586a; background: #f7f9fb;
+      border: 1px solid #b6c0cb; border-radius: 7px; cursor: pointer;
+    }
+    .tab.active { background: #2f6fd0; border-color: #265cae; color: #fff; }
+  </style>
+</head>
+<body>
+  <canvas id="c" width="800" height="460"></canvas>
+  <div id="tabs">
+    <button class="tab" id="tabTug">Tug of War</button>
+    <button class="tab" id="tabMotion">Motion</button>
+  </div>
+  <script>
+  (() => {
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+    const W = 800, H = 460;
+    const qp = new URLSearchParams(location.search);
+    let screen = qp.get('screen') === 'motion' ? 'motion' : 'tug';
+    const paused = qp.get('pause') === '1';     // freeze physics (screenshots)
+    const benchHidden = qp.get('bench') === '0'; // hide unplaced pullers (screenshots)
+
+    // ── Generic helpers ─────────────────────────────────────
+    const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+    const inRect = (px, py, r) => px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h;
+
+    function rr(x, y, w, h, r) {
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.arcTo(x + w, y, x + w, y + h, r);
+      ctx.arcTo(x + w, y + h, x, y + h, r);
+      ctx.arcTo(x, y + h, x, y, r);
+      ctx.arcTo(x, y, x + w, y, r);
+      ctx.closePath();
+    }
+
+    function btnDraw(b, enabled, hot) {
+      rr(b.x, b.y, b.w, b.h, 8);
+      ctx.fillStyle = !enabled ? '#c7ccd3' : hot ? b.hotCol : b.col;
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.lineWidth = 1.5; ctx.stroke();
+      ctx.fillStyle = '#fff'; ctx.font = 'bold 15px Segoe UI';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(b.label, b.x + b.w / 2, b.y + b.h / 2 + 1);
+      ctx.textBaseline = 'alphabetic';
+    }
+
+    function checkboxDraw(r, label, on) {
+      rr(r.x, r.y + 2, 16, 16, 3);
+      ctx.fillStyle = on ? '#2f6fd0' : '#ffffff'; ctx.fill();
+      ctx.strokeStyle = '#7d8a99'; ctx.lineWidth = 1.3; ctx.stroke();
+      if (on) {
+        ctx.beginPath(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 2.4;
+        ctx.moveTo(r.x + 3.5, r.y + 10); ctx.lineTo(r.x + 7, r.y + 14); ctx.lineTo(r.x + 13, r.y + 5.5);
+        ctx.stroke();
+      }
+      ctx.fillStyle = '#334455'; ctx.font = '13px Segoe UI'; ctx.textAlign = 'left';
+      ctx.fillText(label, r.x + 22, r.y + 15);
+    }
+
+    // Horizontal force arrow: tail at (x,y), signed length len (px).
+    function drawArrowH(x, y, len, color, thick) {
+      if (Math.abs(len) < 1) return;
+      const dir = Math.sign(len), tip = x + len;
+      const hd = Math.min(Math.max(14, thick * 1.5), Math.abs(len) * 0.6);
+      ctx.beginPath(); ctx.strokeStyle = color; ctx.lineWidth = thick; ctx.lineCap = 'butt';
+      ctx.moveTo(x, y); ctx.lineTo(tip - dir * hd, y); ctx.stroke();
+      ctx.beginPath(); ctx.fillStyle = color;
+      ctx.moveTo(tip, y);
+      ctx.lineTo(tip - dir * hd, y - thick * 1.35);
+      ctx.lineTo(tip - dir * hd, y + thick * 1.35);
+      ctx.closePath(); ctx.fill();
+    }
+
+    function resetGlyph(r, hot) {
+      rr(r.x, r.y, r.w, r.h, 7);
+      ctx.fillStyle = hot ? '#f3c64b' : '#f6d56f'; ctx.fill();
+      ctx.strokeStyle = '#a8832a'; ctx.lineWidth = 1.3; ctx.stroke();
+      ctx.fillStyle = '#5d4a12'; ctx.font = 'bold 17px Segoe UI';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('↺', r.x + r.w / 2, r.y + r.h / 2 + 1);
+      ctx.textBaseline = 'alphabetic';
+    }
+
+    const RST = { x: 752, y: 10, w: 36, h: 28 };
+
+    // ═════════════════ TUG OF WAR SCREEN ════════════════════
+    const ROPE_Y = 300, GRASS_Y = 352;
+    const SMALL = { f: 50, h: 78 }, LARGE = { f: 100, h: 104 };
+    // Knot x-positions (rope at rest), innermost first
+    const LK = [325, 261, 197, 133];
+    const RK = [475, 539, 603, 667];
+    const TUG_MASS = 160, PXM_T = 40, WIN_X = 150;
+
+    let pullers = [], cartX = 0, cartV = 0;
+    let going = false, finished = false, tugMsg = '', tieT = 0;
+    let sumOn = true, valOn = false;
+    let dragP = null;
+
+    const CB_SUM = { x: 18, y: 12, w: 150, h: 22 };
+    const CB_VAL = { x: 18, y: 40, w: 110, h: 22 };
+    const GO_B  = { x: 322, y: 404, w: 72, h: 36, label: 'Go!',    col: '#3aa83a', hotCol: '#2f8f2f' };
+    const RET_B = { x: 404, y: 404, w: 86, h: 36, label: 'Return', col: '#c8732c', hotCol: '#b06223' };
+
+    function buildTug() {
+      pullers = [];
+      // 3 small + 2 large per team, parked on the team bench
+      const mk = (team, size, hx) => pullers.push({
+        team, size, knot: -1,
+        homeX: hx, homeY: 446, x: hx, y: 446, drag: false
+      });
+      [42, 84, 126].forEach(x => mk('L', 's', x));
+      [176, 230].forEach(x => mk('L', 'l', x));
+      [758, 716, 674].forEach(x => mk('R', 's', x));
+      [624, 570].forEach(x => mk('R', 'l', x));
+      // URL presets: ?left=s,l&right=s,l (default = balanced 2-vs-2 "even" setup)
+      const hasSpec = qp.has('left') || qp.has('right');
+      applySpec(hasSpec ? (qp.get('left') || '') : 's,l', 'L');
+      applySpec(hasSpec ? (qp.get('right') || '') : 's,l', 'R');
+      sumOn = qp.get('sum') !== '0';
+      valOn = qp.get('values') === '1';
+      cartX = 0; cartV = 0; going = false; finished = false;
+      tugMsg = ''; tieT = 0; dragP = null;
+    }
+
+    function applySpec(spec, team) {
+      const sizes = spec.split(',').map(s => s.trim().toLowerCase())
+                        .filter(s => s === 's' || s === 'l').slice(0, 4);
+      let k = 0;
+      for (const sz of sizes) {
+        const p = pullers.find(q => q.team === team && q.size === sz && q.knot < 0 && !q.drag);
+        if (p) p.knot = k++;
+        else k++;
+      }
+    }
+
+    const knotFree = (team, i) => !pullers.some(p => p.team === team && p.knot === i);
+    const knotXOf = (team, i) => (team === 'L' ? LK : RK)[i] + cartX;
+
+    // Nearest free knot (own team) within snapping reach of a dragged puller.
+    function dropKnot(p) {
+      const h = (p.size === 'l' ? LARGE : SMALL).h;
+      const cy = p.y - h * 0.45;
+      let bi = -1, bd = 85;
+      for (let i = 0; i < 4; i++) {
+        if (!knotFree(p.team, i)) continue;
+        const d = Math.hypot(p.x - knotXOf(p.team, i), cy - ROPE_Y);
+        if (d < bd) { bd = d; bi = i; }
+      }
+      return bi;
+    }
+
+    function teamForce(team) {
+      return pullers.reduce((s, p) =>
+        s + (p.team === team && p.knot >= 0 ? (p.size === 'l' ? LARGE.f : SMALL.f) : 0), 0);
+    }
+    const netForce = () => teamForce('R') - teamForce('L');
+
+    // ── Puller figure (original flat "bean person" art) ─────
+    function limb(x1, y1, x2, y2, w, col) {
+      ctx.beginPath(); ctx.strokeStyle = col; ctx.lineWidth = w; ctx.lineCap = 'round';
+      ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+    }
+
+    function drawPuller(p, hl) {
+      const S = p.size === 'l' ? LARGE : SMALL;
+      const h = S.h, r = h * 0.155;
+      const col  = p.team === 'L' ? '#3b6fd4' : '#d2452f';
+      const dark = p.team === 'L' ? '#27498f' : '#8e2c1c';
+      if (hl) { ctx.save(); ctx.shadowColor = col; ctx.shadowBlur = 14; }
+
+      if (p.knot >= 0 && !p.drag) {
+        // Pulling pose: hands on the rope knot, leaning away from center
+        const dir = p.team === 'L' ? -1 : 1;
+        const lean = 0.34 + (going && !finished && netForce() !== 0 ? 0.10 : 0);
+        const hx = knotXOf(p.team, p.knot), hy = ROPE_Y, fy = GRASS_Y + 2;
+        const hipX = hx + dir * h * (0.30 + lean * 0.35), hipY = fy - h * 0.40;
+        const shX = hx + dir * h * 0.22, shY = hy + h * 0.10;
+        // braced legs (toward center)
+        limb(hipX, hipY, hx - dir * h * 0.04, fy, h * 0.11, dark);
+        limb(hipX, hipY, hx - dir * h * 0.30, fy, h * 0.11, dark);
+        // torso
+        limb(hipX, hipY, shX, shY, h * 0.26, col);
+        // arms to the rope
+        limb(shX, shY - 2, hx + dir * 2, hy - 3, h * 0.075, dark);
+        limb(shX, shY + 3, hx + dir * 2, hy + 3, h * 0.075, dark);
+        // hands
+        ctx.beginPath(); ctx.arc(hx, hy, h * 0.055, 0, Math.PI * 2);
+        ctx.fillStyle = '#f3c08a'; ctx.fill();
+        // head + headband, eyes facing center
+        const hdX = shX + dir * 3, hdY = shY - r - h * 0.10;
+        ctx.beginPath(); ctx.arc(hdX, hdY, r, 0, Math.PI * 2);
+        ctx.fillStyle = '#f3c08a'; ctx.fill();
+        ctx.strokeStyle = dark; ctx.lineWidth = 1.4; ctx.stroke();
+        ctx.beginPath(); ctx.arc(hdX, hdY, r, Math.PI * 1.15, Math.PI * 1.85);
+        ctx.strokeStyle = col; ctx.lineWidth = r * 0.55; ctx.stroke();
+        ctx.fillStyle = '#222';
+        ctx.beginPath(); ctx.arc(hdX - dir * r * 0.45, hdY - 1, 1.7, 0, Math.PI * 2); ctx.fill();
+      } else {
+        // Standing pose (bench or while dragged): feet anchor (p.x, p.y)
+        const x = p.x, y = p.y;
+        const hipY = y - h * 0.40, shY = y - h * 0.72;
+        limb(x, hipY, x - h * 0.11, y, h * 0.11, dark);
+        limb(x, hipY, x + h * 0.11, y, h * 0.11, dark);
+        limb(x, hipY, x, shY, h * 0.26, col);
+        limb(x - 2, shY + 3, x - h * 0.17, y - h * 0.38, h * 0.075, dark);
+        limb(x + 2, shY + 3, x + h * 0.17, y - h * 0.38, h * 0.075, dark);
+        const hdY = shY - r - h * 0.08;
+        ctx.beginPath(); ctx.arc(x, hdY, r, 0, Math.PI * 2);
+        ctx.fillStyle = '#f3c08a'; ctx.fill();
+        ctx.strokeStyle = dark; ctx.lineWidth = 1.4; ctx.stroke();
+        ctx.beginPath(); ctx.arc(x, hdY, r, Math.PI * 1.15, Math.PI * 1.85);
+        ctx.strokeStyle = col; ctx.lineWidth = r * 0.55; ctx.stroke();
+        ctx.fillStyle = '#222';
+        ctx.beginPath(); ctx.arc(x - r * 0.32, hdY - 1, 1.7, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(x + r * 0.32, hdY - 1, 1.7, 0, Math.PI * 2); ctx.fill();
+      }
+      if (hl) ctx.restore();
+    }
+
+    function pullerCenter(p) {
+      const h = (p.size === 'l' ? LARGE : SMALL).h;
+      if (p.knot >= 0 && !p.drag) {
+        const dir = p.team === 'L' ? -1 : 1;
+        return [knotXOf(p.team, p.knot) + dir * h * 0.30, GRASS_Y - h * 0.42, h * 0.55];
+      }
+      return [p.x, p.y - h * 0.45, h * 0.52];
+    }
+
+    function drawCart() {
+      const cx = 400 + cartX;
+      // body
+      const bw = 88, bh = 42, by = GRASS_Y - 58;
+      const g = ctx.createLinearGradient(cx - bw / 2, by, cx - bw / 2, by + bh);
+      g.addColorStop(0, '#a8763e'); g.addColorStop(1, '#7d5527');
+      rr(cx - bw / 2, by, bw, bh, 6); ctx.fillStyle = g; ctx.fill();
+      ctx.strokeStyle = '#553a17'; ctx.lineWidth = 1.6; ctx.stroke();
+      ctx.strokeStyle = 'rgba(85,58,23,0.55)'; ctx.lineWidth = 1;
+      for (const fx of [-bw / 6, bw / 6]) {
+        ctx.beginPath(); ctx.moveTo(cx + fx, by + 3); ctx.lineTo(cx + fx, by + bh - 3); ctx.stroke();
+      }
+      // prize balls heaped on top
+      const balls = [[-26, -6, 8, '#e2574c'], [-9, -11, 9, '#4d9be0'], [9, -7, 8, '#58b554'],
+                     [24, -10, 8, '#e0b23f'], [0, -20, 8, '#b06ed0'], [-18, -16, 7, '#e88a3a']];
+      for (const [dx, dy, br, bc] of balls) {
+        ctx.beginPath(); ctx.arc(cx + dx, by + dy, br, 0, Math.PI * 2);
+        ctx.fillStyle = bc; ctx.fill();
+        ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.lineWidth = 1; ctx.stroke();
+      }
+      // pennant
+      limb(cx, by - 24, cx, by - 2, 2.5, '#555');
+      ctx.beginPath(); ctx.moveTo(cx, by - 24); ctx.lineTo(cx + 20, by - 19); ctx.lineTo(cx, by - 14);
+      ctx.closePath(); ctx.fillStyle = '#e0b23f'; ctx.fill();
+      // wheels
+      for (const wx of [-26, 26]) {
+        ctx.beginPath(); ctx.arc(cx + wx, GRASS_Y - 9, 10, 0, Math.PI * 2);
+        ctx.fillStyle = '#3c3c44'; ctx.fill();
+        ctx.beginPath(); ctx.arc(cx + wx, GRASS_Y - 9, 4, 0, Math.PI * 2);
+        ctx.fillStyle = '#b9bec6'; ctx.fill();
+      }
+    }
+
+    function drawTug(mx, my) {
+      // sky + grass
+      const sky = ctx.createLinearGradient(0, 0, 0, GRASS_Y);
+      sky.addColorStop(0, '#bfe2fb'); sky.addColorStop(1, '#e9f6ff');
+      ctx.fillStyle = sky; ctx.fillRect(0, 0, W, GRASS_Y);
+      for (const [cxx, cyy, s] of [[140, 78, 1], [610, 56, 1.25], [395, 108, 0.7]]) {
+        ctx.fillStyle = 'rgba(255,255,255,0.85)';
+        ctx.beginPath();
+        ctx.ellipse(cxx, cyy, 34 * s, 13 * s, 0, 0, Math.PI * 2);
+        ctx.ellipse(cxx + 22 * s, cyy + 4 * s, 24 * s, 10 * s, 0, 0, Math.PI * 2);
+        ctx.ellipse(cxx - 24 * s, cyy + 5 * s, 22 * s, 9 * s, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      const gr = ctx.createLinearGradient(0, GRASS_Y, 0, H);
+      gr.addColorStop(0, '#82c95b'); gr.addColorStop(1, '#5da33c');
+      ctx.fillStyle = gr; ctx.fillRect(0, GRASS_Y, W, H - GRASS_Y);
+
+      // center marker: striped post + faint dashed line
+      ctx.save(); ctx.setLineDash([5, 5]); ctx.strokeStyle = 'rgba(60,80,100,0.35)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(400, ROPE_Y - 64); ctx.lineTo(400, GRASS_Y); ctx.stroke();
+      ctx.restore();
+      for (let i = 0; i < 4; i++) {
+        ctx.fillStyle = i % 2 ? '#fff' : '#d2452f';
+        ctx.fillRect(397, GRASS_Y - 28 + i * 7, 6, 7);
+      }
+
+      // rope + free knots
+      ctx.beginPath(); ctx.strokeStyle = '#b08a4f'; ctx.lineWidth = 6; ctx.lineCap = 'round';
+      ctx.moveTo(36 + cartX, ROPE_Y); ctx.lineTo(764 + cartX, ROPE_Y); ctx.stroke();
+      ctx.beginPath(); ctx.strokeStyle = 'rgba(255,244,214,0.6)'; ctx.lineWidth = 1.6;
+      ctx.moveTo(36 + cartX, ROPE_Y - 1.5); ctx.lineTo(764 + cartX, ROPE_Y - 1.5); ctx.stroke();
+      for (const team of ['L', 'R']) {
+        for (let i = 0; i < 4; i++) {
+          if (!knotFree(team, i)) continue;
+          ctx.beginPath(); ctx.arc(knotXOf(team, i), ROPE_Y, 6, 0, Math.PI * 2);
+          ctx.fillStyle = '#8a6a3a'; ctx.fill();
+          ctx.strokeStyle = '#5e4623'; ctx.lineWidth = 1.5; ctx.stroke();
+        }
+      }
+
+      // drop-target preview while dragging a puller
+      if (dragP) {
+        const di = dropKnot(dragP);
+        if (di >= 0) {
+          ctx.beginPath(); ctx.setLineDash([4, 3]);
+          ctx.arc(knotXOf(dragP.team, di), ROPE_Y, 12, 0, Math.PI * 2);
+          ctx.strokeStyle = dragP.team === 'L' ? '#2456b4' : '#b43322';
+          ctx.lineWidth = 2.5; ctx.stroke(); ctx.setLineDash([]);
+        }
+      }
+
+      drawCart();
+
+      // pullers (attached first, then bench, dragged drawn last)
+      const ordered = pullers.slice().sort((a, b) => (a.drag ? 1 : 0) - (b.drag ? 1 : 0));
+      for (const p of ordered) {
+        if (benchHidden && p.knot < 0 && !p.drag) continue;
+        const [pcx, pcy, prr] = pullerCenter(p);
+        const hl = p.drag || (!going && Math.hypot(mx - pcx, my - pcy) < prr);
+        drawPuller(p, hl);
+      }
+      if (!benchHidden) {
+        // bench strength labels
+        ctx.fillStyle = 'rgba(40,60,40,0.75)'; ctx.font = '10px Segoe UI'; ctx.textAlign = 'center';
+        for (const p of pullers) {
+          if (p.knot < 0 && !p.drag) {
+            ctx.fillText((p.size === 'l' ? '100' : '50') + ' N', p.homeX, p.homeY + 11);
+          }
+        }
+        ctx.fillStyle = 'rgba(255,255,255,0.75)'; ctx.font = 'bold 11px Segoe UI';
+        ctx.fillText('BLUE TEAM', 136, 368);
+        ctx.fillText('RED TEAM', 664, 368);
+      }
+
+      // individual force arrows ("Values")
+      if (valOn) {
+        for (const p of pullers) {
+          if (p.knot < 0 || p.drag) continue;
+          const f = p.size === 'l' ? LARGE.f : SMALL.f;
+          const dir = p.team === 'L' ? -1 : 1;
+          const ax = knotXOf(p.team, p.knot);
+          const col = p.team === 'L' ? '#2456b4' : '#b43322';
+          drawArrowH(ax, 236, dir * f * 0.45, col, 7);
+          ctx.fillStyle = col; ctx.font = 'bold 11px Segoe UI'; ctx.textAlign = 'center';
+          ctx.fillText(f + ' N', ax + dir * f * 0.225, 222);
+        }
+      }
+
+      // sum of forces
+      const net = netForce();
+      if (sumOn) {
+        ctx.fillStyle = '#334455'; ctx.font = 'bold 15px Segoe UI'; ctx.textAlign = 'center';
+        ctx.fillText('Sum of Forces = ' + Math.abs(net) + ' N', 400, 52);
+        if (net !== 0) drawArrowH(400, 78, net * 0.55, '#7c40b8', 12);
+        else {
+          ctx.strokeStyle = '#7c40b8'; ctx.lineWidth = 2;
+          ctx.beginPath(); ctx.moveTo(388, 78); ctx.lineTo(412, 78); ctx.stroke();
+        }
+      }
+
+      // hint
+      if (!going && !finished && pullers.every(p => p.knot < 0)) {
+        ctx.fillStyle = '#8aa0b5'; ctx.font = '13px Segoe UI'; ctx.textAlign = 'center';
+        ctx.fillText('Drag people from the benches onto the rope, then press Go!', 400, 200);
+      }
+
+      // result banner
+      if (tugMsg) {
+        ctx.font = 'bold 22px Segoe UI';
+        const tw = ctx.measureText(tugMsg).width;
+        rr(400 - tw / 2 - 18, 118, tw + 36, 40, 10);
+        ctx.fillStyle = 'rgba(255,255,255,0.92)'; ctx.fill();
+        ctx.strokeStyle = '#a8b4c0'; ctx.lineWidth = 1.5; ctx.stroke();
+        ctx.fillStyle = '#334455'; ctx.textAlign = 'center';
+        ctx.fillText(tugMsg, 400, 146);
+      }
+
+      // controls
+      checkboxDraw(CB_SUM, 'Sum of Forces', sumOn);
+      checkboxDraw(CB_VAL, 'Values', valOn);
+      const anyOn = pullers.some(p => p.knot >= 0);
+      btnDraw(GO_B, anyOn && !going && !finished, inRect(mx, my, GO_B));
+      btnDraw(RET_B, true, inRect(mx, my, RET_B));
+      resetGlyph(RST, inRect(mx, my, RST));
+    }
+
+    function stepTug(dt) {
+      if (!going || finished) return;
+      const net = netForce();
+      if (net === 0) {
+        tieT += dt;
+        if (tieT > 0.9) { finished = true; going = false; tugMsg = "It's a tie!"; }
+      } else {
+        cartV += (net / TUG_MASS) * dt;
+        cartX += cartV * PXM_T * dt;
+        if (Math.abs(cartX) >= WIN_X) {
+          cartX = Math.sign(cartX) * WIN_X;
+          finished = true; going = false;
+          tugMsg = (net > 0 ? 'Red' : 'Blue') + ' team wins!';
+        }
+      }
+    }
+
+    // ═════════════════ MOTION SCREEN ════════════════════════
+    // Crate of mass 50 kg on frictionless ice. a = F/m exactly; with no
+    // applied force the crate glides at constant velocity (Newton's 1st law).
+    const ICE_Y = 350, M_MASS = 50, PXM_M = 18, VMAX = 40;
+    const SLT = { x: 250, y: 434, w: 300 };               // slider track
+    const SL_HIT = { x: 236, y: 414, w: 328, h: 42 };     // slider grab region
+    const F0 = clamp(Math.round(parseFloat(qp.get('force') || '0')) || 0, -100, 100);
+    let mForce = 0, mVel = 0, mPos = 0, mPushed = false, slDrag = false;
+    let pushSide = 1; // which way the pusher last pushed (+1 = rightward)
+
+    function buildMotion() {
+      mForce = F0; mVel = 0; mPos = 0;
+      mPushed = F0 !== 0; slDrag = false;
+      pushSide = F0 < 0 ? -1 : 1;
+    }
+
+    function stepMotion(dt) {
+      mVel = clamp(mVel + (mForce / M_MASS) * dt, -VMAX, VMAX);
+      mPos += mVel * dt;
+    }
+
+    const mod2 = (a, n) => ((a % n) + n) % n;
+    const sliderX = f => SLT.x + ((f + 100) / 200) * SLT.w;
+
+    function setSliderFrom(px) {
+      let f = Math.round(clamp(((px - SLT.x) / SLT.w) * 200 - 100, -100, 100));
+      if (Math.abs(f) < 4) f = 0;
+      mForce = f;
+      if (f !== 0) mPushed = true;
+    }
+
+    function pine(x, baseY, s) {
+      limb(x, baseY, x, baseY - 10 * s, 5 * s, '#7a5a34');
+      ctx.fillStyle = '#3e7d4a';
+      for (let t = 0; t < 3; t++) {
+        const w2 = (26 - t * 6) * s, ty = baseY - (8 + t * 14) * s;
+        ctx.beginPath();
+        ctx.moveTo(x - w2 / 2, ty); ctx.lineTo(x + w2 / 2, ty); ctx.lineTo(x, ty - 20 * s);
+        ctx.closePath(); ctx.fill();
+      }
+    }
+
+    function drawMotionBG() {
+      const sky = ctx.createLinearGradient(0, 0, 0, ICE_Y);
+      sky.addColorStop(0, '#b9def8'); sky.addColorStop(1, '#eef8ff');
+      ctx.fillStyle = sky; ctx.fillRect(0, 0, W, ICE_Y);
+
+      // clouds (slow parallax — far away)
+      const co = mod2(-mPos * PXM_M * 0.2, 640);
+      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      for (let bx = co - 640; bx < W + 640; bx += 640) {
+        ctx.beginPath();
+        ctx.ellipse(bx + 120, 60, 36, 13, 0, 0, Math.PI * 2);
+        ctx.ellipse(bx + 146, 66, 25, 10, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.ellipse(bx + 470, 100, 28, 11, 0, 0, Math.PI * 2);
+        ctx.ellipse(bx + 449, 105, 20, 8, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // snow bank + pine trees scrolling at true ground speed
+      ctx.fillStyle = '#f2f8fc'; ctx.fillRect(0, ICE_Y - 18, W, 18);
+      const to = mod2(-mPos * PXM_M, 420);
+      for (let bx = to - 420; bx < W + 420; bx += 420) {
+        pine(bx + 60, ICE_Y - 6, 1);
+        pine(bx + 255, ICE_Y - 8, 0.72);
+      }
+
+      // ice
+      const ig = ctx.createLinearGradient(0, ICE_Y, 0, 396);
+      ig.addColorStop(0, '#e2f3fb'); ig.addColorStop(1, '#bcdff0');
+      ctx.fillStyle = ig; ctx.fillRect(0, ICE_Y, W, 396 - ICE_Y);
+      ctx.strokeStyle = '#9fc6da'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(0, ICE_Y); ctx.lineTo(W, ICE_Y); ctx.stroke();
+      // skate marks scrolling with the ground
+      const so = mod2(-mPos * PXM_M, 90);
+      ctx.strokeStyle = 'rgba(125,170,196,0.55)'; ctx.lineWidth = 1.5;
+      for (let x = so - 90; x < W + 90; x += 90) {
+        ctx.beginPath(); ctx.moveTo(x, ICE_Y + 13); ctx.lineTo(x + 30, ICE_Y + 13); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(x + 46, ICE_Y + 30); ctx.lineTo(x + 74, ICE_Y + 30); ctx.stroke();
+      }
+      ctx.fillStyle = 'rgba(70,110,140,0.55)'; ctx.font = 'italic 12px Segoe UI';
+      ctx.textAlign = 'left';
+      ctx.fillText('smooth ice — no friction', 12, 390);
+
+      // control strip
+      ctx.fillStyle = '#edf1f5'; ctx.fillRect(0, 396, W, H - 396);
+    }
+
+    function drawCrate(cx) {
+      const s = 78, x = cx - s / 2, y = ICE_Y - s;
+      const g = ctx.createLinearGradient(x, y, x, y + s);
+      g.addColorStop(0, '#cf9a55'); g.addColorStop(1, '#a87338');
+      rr(x, y, s, s, 5); ctx.fillStyle = g; ctx.fill();
+      ctx.strokeStyle = '#6e4a1e'; ctx.lineWidth = 2; ctx.stroke();
+      ctx.strokeStyle = 'rgba(110,74,30,0.8)'; ctx.lineWidth = 4;
+      rr(x + 6, y + 6, s - 12, s - 12, 3); ctx.stroke();
+      limb(x + 9, y + 9, x + s - 9, y + s - 9, 4, 'rgba(110,74,30,0.5)');
+      rr(cx - 24, y + s / 2 - 12, 48, 24, 4);
+      ctx.fillStyle = '#fff8ea'; ctx.fill();
+      ctx.strokeStyle = '#6e4a1e'; ctx.lineWidth = 1.2; ctx.stroke();
+      ctx.fillStyle = '#5d4a26'; ctx.font = 'bold 13px Segoe UI';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('50 kg', cx, y + s / 2 + 1);
+      ctx.textBaseline = 'alphabetic';
+    }
+
+    // Green-shirt pusher (same bean-person style as the tug pullers).
+    function drawPusher() {
+      const h = 92, r = h * 0.14;
+      const col = '#2f9e6e', dark = '#1d6a49', skin = '#f3c08a';
+      if (mForce !== 0) pushSide = Math.sign(mForce);
+      const dir = pushSide, fy = ICE_Y;
+      if (mForce !== 0) {
+        // Pushing pose: hands on the crate face, leaning into the push
+        const edge = 400 - dir * 40;
+        const lean = 0.72 + (Math.abs(mForce) / 100) * 0.16;
+        const hx = edge - dir * 2, hy1 = fy - 52, hy2 = fy - 40;
+        const shX = edge - dir * h * 0.34, shY = fy - h * 0.60;
+        const hipX = edge - dir * h * 0.50, hipY = fy - h * 0.42;
+        limb(hipX, hipY, edge - dir * h * lean, fy, h * 0.105, dark);
+        limb(hipX, hipY, edge - dir * h * (lean - 0.26), fy, h * 0.105, dark);
+        limb(hipX, hipY, shX, shY, h * 0.25, col);
+        limb(shX, shY - 3, hx, hy1, h * 0.07, dark);
+        limb(shX, shY + 2, hx, hy2, h * 0.07, dark);
+        ctx.fillStyle = skin;
+        ctx.beginPath(); ctx.arc(hx, hy1, h * 0.05, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(hx, hy2, h * 0.05, 0, Math.PI * 2); ctx.fill();
+        const hdX = shX + dir * 4, hdY = shY - r - 5;
+        ctx.beginPath(); ctx.arc(hdX, hdY, r, 0, Math.PI * 2);
+        ctx.fillStyle = skin; ctx.fill();
+        ctx.strokeStyle = dark; ctx.lineWidth = 1.4; ctx.stroke();
+        ctx.beginPath(); ctx.arc(hdX, hdY, r, Math.PI * 1.1, Math.PI * 1.9);
+        ctx.strokeStyle = col; ctx.lineWidth = r * 0.55; ctx.stroke();
+        ctx.fillStyle = '#222';
+        ctx.beginPath(); ctx.arc(hdX + dir * r * 0.45, hdY - 1, 1.7, 0, Math.PI * 2); ctx.fill();
+      } else {
+        // Standing beside the crate, ready to push
+        const x = 400 - dir * 112;
+        const hipY = fy - h * 0.42, shY = fy - h * 0.70;
+        limb(x, hipY, x - h * 0.10, fy, h * 0.105, dark);
+        limb(x, hipY, x + h * 0.10, fy, h * 0.105, dark);
+        limb(x, hipY, x, shY, h * 0.25, col);
+        limb(x - 2, shY + 3, x - h * 0.15, fy - h * 0.36, h * 0.07, dark);
+        limb(x + 2, shY + 3, x + h * 0.15, fy - h * 0.36, h * 0.07, dark);
+        const hdY = shY - r - 5;
+        ctx.beginPath(); ctx.arc(x, hdY, r, 0, Math.PI * 2);
+        ctx.fillStyle = skin; ctx.fill();
+        ctx.strokeStyle = dark; ctx.lineWidth = 1.4; ctx.stroke();
+        ctx.beginPath(); ctx.arc(x, hdY, r, Math.PI * 1.1, Math.PI * 1.9);
+        ctx.strokeStyle = col; ctx.lineWidth = r * 0.55; ctx.stroke();
+        ctx.fillStyle = '#222';
+        ctx.beginPath(); ctx.arc(x - r * 0.32, hdY - 1, 1.7, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(x + r * 0.32, hdY - 1, 1.7, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+
+    function drawForceArrow() {
+      if (mForce === 0) return;
+      const dir = Math.sign(mForce);
+      const tail = 400 + dir * 44, len = mForce * 1.3, y = 300;
+      drawArrowH(tail, y, len, '#e8862a', 17);
+      ctx.fillStyle = '#b35f0d'; ctx.font = 'bold 15px Segoe UI';
+      ctx.textAlign = dir > 0 ? 'left' : 'right'; ctx.textBaseline = 'middle';
+      ctx.fillText('Applied Force = ' + Math.abs(mForce) + ' N', tail + len + dir * 12, y);
+      ctx.textBaseline = 'alphabetic'; ctx.textAlign = 'left';
+    }
+
+    function drawSpeedo() {
+      const cx = 400, cy = 88, R = 54;
+      ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2);
+      ctx.fillStyle = '#fff'; ctx.fill();
+      ctx.strokeStyle = '#5a6a7a'; ctx.lineWidth = 3; ctx.stroke();
+      const A0 = Math.PI * 215 / 180, A1 = -Math.PI * 35 / 180;
+      const ang = v => A0 + (clamp(v, 0, VMAX) / VMAX) * (A1 - A0);
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      for (let s = 0; s <= VMAX; s += 5) {
+        const a = ang(s), c = Math.cos(a), sn = -Math.sin(a);
+        const big = s % 10 === 0;
+        ctx.beginPath(); ctx.strokeStyle = '#5a6a7a'; ctx.lineWidth = big ? 2 : 1;
+        ctx.moveTo(cx + c * (R - (big ? 10 : 7)), cy + sn * (R - (big ? 10 : 7)));
+        ctx.lineTo(cx + c * (R - 3), cy + sn * (R - 3));
+        ctx.stroke();
+        if (big) {
+          ctx.fillStyle = '#46586a'; ctx.font = '9px Segoe UI';
+          ctx.fillText(String(s), cx + c * (R - 19), cy + sn * (R - 19));
+        }
+      }
+      ctx.fillStyle = '#334455'; ctx.font = 'bold 11px Segoe UI';
+      ctx.fillText('Speed (m/s)', cx, cy + R * 0.45);
+      // needle
+      const a = ang(Math.abs(mVel)), c = Math.cos(a), sn = -Math.sin(a);
+      ctx.beginPath(); ctx.strokeStyle = '#d2452f'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+      ctx.moveTo(cx - c * 8, cy - sn * 8); ctx.lineTo(cx + c * (R - 13), cy + sn * (R - 13));
+      ctx.stroke();
+      ctx.beginPath(); ctx.arc(cx, cy, 4.5, 0, Math.PI * 2); ctx.fillStyle = '#333'; ctx.fill();
+      // numeric readout pill
+      const spd = Math.abs(mVel) < 0.05 ? 0 : Math.abs(mVel);
+      const txt = spd.toFixed(1) + ' m/s' + (mVel > 0.05 ? '  →' : mVel < -0.05 ? '  ←' : '');
+      ctx.font = 'bold 13px Segoe UI';
+      const tw = ctx.measureText(txt).width;
+      rr(cx - tw / 2 - 10, cy + R + 8, tw + 20, 22, 11);
+      ctx.fillStyle = 'rgba(255,255,255,0.9)'; ctx.fill();
+      ctx.strokeStyle = '#a8b4c0'; ctx.lineWidth = 1.2; ctx.stroke();
+      ctx.fillStyle = '#334455';
+      ctx.fillText(txt, cx, cy + R + 19);
+      ctx.textBaseline = 'alphabetic';
+    }
+
+    function drawSlider(mx, my) {
+      rr(214, 400, 372, 56, 10);
+      ctx.fillStyle = 'rgba(255,255,255,0.9)'; ctx.fill();
+      ctx.strokeStyle = '#b6c0cb'; ctx.lineWidth = 1.2; ctx.stroke();
+      ctx.fillStyle = '#334455'; ctx.font = 'bold 12px Segoe UI'; ctx.textAlign = 'center';
+      ctx.fillText('Applied Force (N)', 400, 414);
+      const ty = SLT.y;
+      rr(SLT.x, ty - 3, SLT.w, 6, 3);
+      ctx.fillStyle = '#d3dae2'; ctx.fill();
+      ctx.strokeStyle = '#9aa7b4'; ctx.lineWidth = 1; ctx.stroke();
+      ctx.font = '9px Segoe UI';
+      for (let f = -100; f <= 100; f += 50) {
+        const x = sliderX(f);
+        limb(x, ty + 5, x, ty + 9, 1, '#9aa7b4');
+        ctx.fillStyle = '#67788a'; ctx.textAlign = 'center';
+        ctx.fillText(String(f), x, ty + 19);
+      }
+      const hx = sliderX(mForce);
+      const hot = slDrag || inRect(mx, my, SL_HIT);
+      rr(hx - 8, ty - 14, 16, 28, 5);
+      ctx.fillStyle = hot ? '#e07b1f' : '#f08c2e'; ctx.fill();
+      ctx.strokeStyle = '#9e5512'; ctx.lineWidth = 1.4; ctx.stroke();
+    }
+
+    function drawMotion(mx, my) {
+      drawMotionBG();
+      drawPusher();
+      drawCrate(400);
+      drawForceArrow();
+      drawSpeedo();
+      drawSlider(mx, my);
+      if (!mPushed && Math.abs(mVel) < 0.01) {
+        ctx.fillStyle = '#8aa0b5'; ctx.font = '13px Segoe UI'; ctx.textAlign = 'center';
+        ctx.fillText('Drag and hold the Applied Force slider to push the crate.', 400, 196);
+        ctx.fillText('Let go of the slider and watch what happens to the speed.', 400, 216);
+      }
+      resetGlyph(RST, inRect(mx, my, RST));
+    }
+
+    // ═════════════════ INPUT ════════════════════════════════
+    let mx = -1, my = -1;
+
+    function evPos(e) {
+      const r = canvas.getBoundingClientRect();
+      return [(e.clientX - r.left) * (W / r.width), (e.clientY - r.top) * (H / r.height)];
+    }
+
+    function pickPuller(px, py) {
+      let best = null, bd = 1e9;
+      for (const p of pullers) {
+        if (benchHidden && p.knot < 0 && !p.drag) continue;
+        const [pcx, pcy, prr] = pullerCenter(p);
+        const d = Math.hypot(px - pcx, py - pcy);
+        if (d < prr && d < bd) { bd = d; best = p; }
+      }
+      return best;
+    }
+
+    canvas.addEventListener('pointerdown', e => {
+      const [px, py] = evPos(e);
+      mx = px; my = py;
+      canvas.setPointerCapture(e.pointerId);
+      if (inRect(px, py, RST)) {
+        if (screen === 'tug') buildTug(); else buildMotion();
+        return;
+      }
+      if (screen === 'tug') {
+        if (inRect(px, py, CB_SUM)) { sumOn = !sumOn; return; }
+        if (inRect(px, py, CB_VAL)) { valOn = !valOn; return; }
+        if (inRect(px, py, GO_B) && !going && !finished &&
+            pullers.some(p => p.knot >= 0)) {
+          going = true; tieT = 0; tugMsg = '';
+          return;
+        }
+        if (inRect(px, py, RET_B)) {
+          cartX = 0; cartV = 0; going = false; finished = false;
+          tugMsg = ''; tieT = 0;
+          return;
+        }
+        if (!going) {
+          const p = pickPuller(px, py);
+          if (p) {
+            const h = (p.size === 'l' ? LARGE : SMALL).h;
+            p.drag = true; p.knot = -1;
+            p.x = px; p.y = py + h * 0.45;
+            dragP = p;
+          }
+        }
+      } else {
+        if (inRect(px, py, SL_HIT)) { slDrag = true; setSliderFrom(px); }
+      }
+    });
+
+    canvas.addEventListener('pointermove', e => {
+      const [px, py] = evPos(e);
+      mx = px; my = py;
+      if (dragP) {
+        const h = (dragP.size === 'l' ? LARGE : SMALL).h;
+        dragP.x = clamp(px, 14, W - 14);
+        dragP.y = clamp(py + h * 0.45, 90, H - 6);
+      } else if (slDrag) {
+        setSliderFrom(px);
+      }
+      // cursor feedback
+      let cur = 'default';
+      if (dragP) cur = 'grabbing';
+      else if (slDrag) cur = 'ew-resize';
+      else if (screen === 'tug') {
+        const anyOn = pullers.some(p => p.knot >= 0);
+        if (inRect(px, py, RST) || inRect(px, py, CB_SUM) || inRect(px, py, CB_VAL) ||
+            inRect(px, py, RET_B) || (anyOn && !going && !finished && inRect(px, py, GO_B))) {
+          cur = 'pointer';
+        } else if (!going && pickPuller(px, py)) cur = 'grab';
+      } else {
+        if (inRect(px, py, RST)) cur = 'pointer';
+        else if (inRect(px, py, SL_HIT)) cur = 'ew-resize';
+      }
+      canvas.style.cursor = cur;
+    });
+
+    function endPointer() {
+      if (dragP) {
+        const p = dragP;
+        dragP = null; p.drag = false;
+        const di = dropKnot(p);
+        if (di >= 0) p.knot = di;
+        else { p.x = p.homeX; p.y = p.homeY; }
+      }
+      if (slDrag) { slDrag = false; mForce = 0; } // let go ⇒ stop pushing
+    }
+    canvas.addEventListener('pointerup', endPointer);
+    canvas.addEventListener('pointercancel', endPointer);
+    canvas.addEventListener('pointerleave', () => {
+      if (!dragP && !slDrag) { mx = -1; my = -1; }
+    });
+
+    // ═════════════════ TABS + MAIN LOOP ═════════════════════
+    const tabT = document.getElementById('tabTug');
+    const tabM = document.getElementById('tabMotion');
+    function setScreen(s) {
+      screen = s;
+      tabT.classList.toggle('active', s === 'tug');
+      tabM.classList.toggle('active', s === 'motion');
+      canvas.style.cursor = 'default';
+    }
+    tabT.addEventListener('click', () => setScreen('tug'));
+    tabM.addEventListener('click', () => setScreen('motion'));
+
+    buildTug();
+    buildMotion();
+    setScreen(screen);
+
+    let last = 0;
+    function frame(ts) {
+      const dt = Math.min((ts - last) / 1000, 0.05) || 0;
+      last = ts;
+      if (!paused) {
+        if (screen === 'tug') stepTug(dt); else stepMotion(dt);
+      }
+      if (screen === 'tug') drawTug(mx, my); else drawMotion(mx, my);
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+  })();
+  </script>
+</body>
+</html>

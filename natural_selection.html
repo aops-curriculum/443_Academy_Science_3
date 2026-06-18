@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<!-- Original AoPS interactive. Replaces the third-party "Natural Selection" simulation. -->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Natural Selection: Bunny Population</title>
+<script>
+// EigenNode auto-height v2.4
+(function() {
+  // 4px buffer for subpixel rounding + parent's >=3px noise threshold.
+  // Extra 18px when horizontal overflow forces a scrollbar (eats vertical
+  // space inside the iframe — AoPS classroom embeds in a narrower column
+  // than the 600px content, so a horizontal scrollbar appears and steals
+  // ~10-17px of height). Without this, the iframe ends up ~11-15px short.
+  var BUFFER = 4;
+  var H_SCROLLBAR = 18;
+  var measuring = false;
+  function measure() {
+    if (measuring) return 0;
+    var b = document.body, h = document.documentElement;
+    if (!b) return 0;
+    measuring = true;
+    // Temporarily neutralise body's height/min-height (overriding stylesheet
+    // rules with !important) so scrollHeight reflects actual content extent.
+    // Without this, patterns like body { height: 100vh } cause scrollHeight
+    // to echo the iframe's current viewport — adding BUFFER each cycle
+    // ratchets the iframe taller forever. Browser doesn't paint until this
+    // synchronous block returns, so no visible flicker.
+    var hOld = b.style.height, hPri = b.style.getPropertyPriority('height');
+    var mOld = b.style.minHeight, mPri = b.style.getPropertyPriority('min-height');
+    b.style.setProperty('height', 'auto', 'important');
+    b.style.setProperty('min-height', '0', 'important');
+    var content = b.scrollHeight || 0;
+    if (hOld) b.style.setProperty('height', hOld, hPri); else b.style.removeProperty('height');
+    if (mOld) b.style.setProperty('min-height', mOld, mPri); else b.style.removeProperty('min-height');
+    measuring = false;
+    // Check the documentElement only — that's the element that owns the
+    // iframe's horizontal scrollbar. Body can be narrower than the iframe
+    // (e.g. body{width:600px} centered in a 700px iframe) and have its own
+    // 1-2px overflow that doesn't actually trigger a scrollbar.
+    var hOverflow = h && (h.scrollWidth - h.clientWidth) >= 4;
+    return Math.ceil(content) + BUFFER + (hOverflow ? H_SCROLLBAR : 0);
+  }
+  var last = 0;
+  function report() {
+    var h = measure();
+    if (h > 0 && Math.abs(h - last) >= 2) {
+      last = h;
+      window.parent.postMessage({ type: 'resize', height: h }, '*');
+    }
+  }
+  window.addEventListener('load', report);
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(report);
+  if (window.ResizeObserver && document.body) new ResizeObserver(report).observe(document.body);
+})();
+</script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 800px; overflow: hidden;
+      background: #f5f5f5;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      user-select: none;
+      color: #2a323c;
+    }
+    canvas { display: block; }
+    #controls {
+      width: 800px; padding: 8px 10px 10px;
+      display: flex; flex-direction: column; gap: 7px;
+      background: #eef1f4; border-top: 1px solid #d4dae1;
+    }
+    .row { display: flex; align-items: center; gap: 9px; flex-wrap: nowrap; }
+    .grp { display: inline-flex; align-items: center; gap: 6px; }
+    .lbl { font-size: 12px; color: #5a6573; font-weight: 600; }
+    .spacer { flex: 1 1 auto; }
+    .btn {
+      font: 600 12.5px 'Segoe UI', sans-serif;
+      padding: 6px 11px; border: 1px solid #c2cad3; border-radius: 7px;
+      background: #ffffff; color: #2a323c; cursor: pointer; white-space: nowrap;
+    }
+    .btn:hover:not(:disabled) { background: #f1f6fb; border-color: #9fb4c8; }
+    .btn:disabled { opacity: .45; cursor: default; }
+    .btn.primary { background: #2f7d4f; border-color: #266a42; color: #fff; }
+    .btn.primary:hover:not(:disabled) { background: #36905b; }
+    .btn.on { background: #2563b0; border-color: #1d4f8c; color: #fff; }
+    .btn.reset { background: #e8820c; border-color: #c96f06; color: #fff; }
+    .btn.reset:hover { background: #f6921e; }
+    .seg { display: inline-flex; border: 1px solid #c2cad3; border-radius: 7px; overflow: hidden; }
+    .seg button {
+      font: 600 12.5px 'Segoe UI', sans-serif; border: none; background: #fff;
+      color: #45505d; padding: 6px 10px; cursor: pointer; border-left: 1px solid #d6dde4;
+    }
+    .seg button:first-child { border-left: none; }
+    .seg button.on { background: #3d4f63; color: #fff; }
+    .checks label { font-size: 12.5px; font-weight: 600; color: #45505d; display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+    .checks input { width: 15px; height: 15px; accent-color: #2563b0; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <canvas id="c" width="800" height="500"></canvas>
+  <div id="controls">
+    <div class="row">
+      <span class="grp">
+        <span class="lbl">Habitat</span>
+        <span class="seg" id="segHabitat">
+          <button data-v="equator">Equator</button>
+          <button data-v="arctic">Arctic</button>
+        </span>
+      </span>
+      <button id="btnMate" class="btn primary">Add a mate</button>
+      <button id="btnPlay" class="btn">Pause</button>
+      <button id="btnFF" class="btn">&#9193; Fast</button>
+      <span class="spacer"></span>
+      <span class="lbl" id="speedNote" style="color:#8a96a3;font-weight:600;"></span>
+    </div>
+    <div class="row">
+      <span class="grp">
+        <span class="lbl">Dominant fur</span>
+        <span class="seg" id="segDom">
+          <button data-v="brown">Brown</button>
+          <button data-v="white">White</button>
+        </span>
+      </span>
+      <button id="btnMutate" class="btn">&#43; Add fur mutation</button>
+      <span class="grp checks">
+        <label><input type="checkbox" id="chkWolves"> Wolves</label>
+        <label><input type="checkbox" id="chkFood"> Limited food</label>
+      </span>
+      <span class="spacer"></span>
+      <button id="btnReset" class="btn reset">&#8634; Reset all</button>
+    </div>
+  </div>
+
+<script>
+(() => {
+  "use strict";
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const W = 800, H = 500;
+
+  // ── Tunable model constants (validated for gen-6 takeover & journal counts) ──
+  const GEN_PERIOD   = 10;    // seconds per generation at 1x
+  const FAST_MULT    = 4;     // fast-forward multiplier
+  const MAX_AGE      = 8;     // generations before death of old age
+  const TAKEOVER     = 750;   // population that "takes over the world"
+  const FOOD_CAP     = 180;   // carrying capacity when Limited Food is on
+  const KILL_STANDOUT= 0.70;  // wolf kill prob for the fur that MISmatches habitat
+  const KILL_CAMO    = 0.12;  // wolf kill prob for the camouflaged fur
+  const LITTER_MIN   = 3, LITTER_MAX = 5;
+  const SAMPLE_MAX   = 45;    // max bunnies drawn in the scene
+
+  // ── URL parameters ──────────────────────────────────────────
+  const Q = new URLSearchParams(location.search);
+  const truthy = v => v === '1' || v === 'true' || v === 'yes' || v === 'on';
+  const intOr = (v, d) => { const n = parseInt(v, 10); return isNaN(n) ? d : n; };
+
+  const seed = intOr(Q.get('seed'), 42);
+
+  // ── Seeded RNG (mulberry32) — drives ALL genetic events ─────
+  function mulberry32(a){ return function(){ a|=0; a=(a+0x6D2B79F5)|0; let t=Math.imul(a^(a>>>15),1|a); t=(t+Math.imul(t^(t>>>7),61|t))^t; return ((t^(t>>>14))>>>0)/4294967296; }; }
+  let rng = mulberry32(seed);
+  const rfloat = () => rng();
+  // Visual randomness (hops, positions) is cosmetic → Math.random is fine.
+
+  // ── State ───────────────────────────────────────────────────
+  let habitat      = Q.get('habitat') === 'arctic' ? 'arctic' : 'equator';
+  let dominantColor= Q.get('dominant') === 'brown' ? 'brown' : 'white';
+  let wolves       = truthy(Q.get('wolves'));
+  let food         = truthy(Q.get('food'));
+
+  let bunnies = [];          // {a,b,age}  a,b ∈ 'brown'|'white'
+  let generation = 0;
+  let history = [];          // history[gen] = {homB,het,homW}
+  let hasMate = false, mutationAdded = false, ended = null; // ended: null|'takeover'|'extinct'
+  let running = false, fast = false, acc = 0;
+  let sprites = [];
+
+  // ── Genetics helpers ────────────────────────────────────────
+  const phenotype = b => (b.a === b.b ? b.a : dominantColor);
+  function countGeno(list){
+    list = list || bunnies; let homB=0, het=0, homW=0;
+    for (const b of list){
+      if (b.a==='brown' && b.b==='brown') homB++;
+      else if (b.a==='white' && b.b==='white') homW++;
+      else het++;
+    }
+    return { homB, het, homW };
+  }
+  // phenotype counts at a recorded generation, using CURRENT dominance
+  function phAt(g){
+    const h = history[g]; if (!h) return { t:0, w:0, b:0 };
+    const t = h.homB + h.het + h.homW;
+    const b = h.homB + (dominantColor==='brown' ? h.het : 0);
+    const w = h.homW + (dominantColor==='white' ? h.het : 0);
+    return { t, w, b };
+  }
+  const recordHistory = () => { history[generation] = countGeno(); };
+
+  function shuffleSeeded(a){
+    for (let i=a.length-1; i>0; i--){ const j=Math.floor(rfloat()*(i+1)); const t=a[i]; a[i]=a[j]; a[j]=t; }
+  }
+
+  // ── Setup / reset ───────────────────────────────────────────
+  function initSim(){
+    bunnies = [{ a:'white', b:'white', age:0 }];
+    generation = 0; history = [];
+    hasMate = false; mutationAdded = false; ended = null; acc = 0;
+    recordHistory(); rebuildSprites();
+  }
+  function fullReset(){
+    rng = mulberry32(seed);
+    initSim();
+    running = false; fast = false;
+    syncUI();
+  }
+
+  function addMate(){
+    if (hasMate || ended) return;
+    bunnies.push({ a:'white', b:'white', age:0 });
+    hasMate = true;
+    recordHistory(); rebuildSprites();
+    running = true;
+    syncUI();
+  }
+
+  function addMutation(){
+    if (mutationAdded || bunnies.length === 0 || ended) return;
+    const whites = bunnies.filter(b => b.a==='white' && b.b==='white');
+    const pool = whites.length ? whites : bunnies;
+    const target = pool[Math.floor(rfloat()*pool.length)];
+    target.a = 'brown';            // homozygous white → heterozygous brown carrier
+    mutationAdded = true;
+    recordHistory(); rebuildSprites();
+    syncUI();
+  }
+
+  // ── One generation ──────────────────────────────────────────
+  function step(){
+    if (ended || bunnies.length < 2) return;
+
+    // 1. Random mating → offspring (Mendelian: one random allele per parent)
+    const pool = bunnies.slice(); shuffleSeeded(pool);
+    const offspring = [];
+    for (let i=0; i+1 < pool.length; i+=2){
+      const p1 = pool[i], p2 = pool[i+1];
+      const litter = LITTER_MIN + Math.floor(rfloat()*(LITTER_MAX - LITTER_MIN + 1));
+      for (let k=0; k<litter; k++){
+        const a = rfloat() < 0.5 ? p1.a : p1.b;   // from "father"
+        const b = rfloat() < 0.5 ? p2.a : p2.b;   // from "mother"
+        offspring.push({ a, b, age:0 });
+      }
+    }
+
+    // 2. Aging + death of old age
+    for (const b of bunnies) b.age++;
+    let next = bunnies.filter(b => b.age <= MAX_AGE).concat(offspring);
+    generation++;
+
+    // 3. Wolves: predation favoring the fur that MISmatches the habitat
+    if (wolves){
+      const mismatch = habitat === 'equator' ? 'white' : 'brown';
+      next = next.filter(b => {
+        const kp = phenotype(b) === mismatch ? KILL_STANDOUT : KILL_CAMO;
+        return rfloat() >= kp;          // survive when draw >= kill prob
+      });
+    }
+
+    // 4. Limited food: color-neutral carrying capacity
+    if (food && next.length > FOOD_CAP){
+      shuffleSeeded(next);
+      next = next.slice(0, FOOD_CAP);
+    }
+
+    bunnies = next;
+    recordHistory();
+    rebuildSprites();
+
+    if (bunnies.length === 0){ ended = 'extinct'; running = false; }
+    else if (bunnies.length > TAKEOVER){ ended = 'takeover'; running = false; }
+    if (ended) syncUI();
+  }
+
+  function runTo(n){ while (generation < n && !ended && bunnies.length >= 2) step(); }
+
+  // ── Scene sprites (representative sample of the population) ──
+  function makeSprite(geno){
+    const y = 138 + Math.random()*138;            // ground band 138..276
+    return {
+      geno, x: 32 + Math.random()*(W-64), y,
+      vx: (Math.random()<0.5?-1:1)*(7 + Math.random()*15),
+      facing: Math.random()<0.5?-1:1,
+      t: Math.random()*10, phase: Math.random()*6.283,
+      hopSpeed: 3.6 + Math.random()*2.2, hopH: 6 + Math.random()*3.5,
+      scale: 0.82 + (y-138)/138*0.55
+    };
+  }
+  function rebuildSprites(){
+    sprites = [];
+    const N = bunnies.length; if (N === 0) return;
+    if (N <= SAMPLE_MAX){
+      for (const b of bunnies) sprites.push(makeSprite({ a:b.a, b:b.b }));
+    } else {
+      const c = countGeno();
+      for (let i=0; i<SAMPLE_MAX; i++){
+        const r = Math.random()*N; let geno;
+        if (r < c.homW) geno = { a:'white', b:'white' };
+        else if (r < c.homW + c.het) geno = Math.random()<0.5 ? { a:'brown', b:'white' } : { a:'white', b:'brown' };
+        else geno = { a:'brown', b:'brown' };
+        sprites.push(makeSprite(geno));
+      }
+    }
+  }
+
+  // ── Pointer (data-probe on graph, allele peek on bunnies) ───
+  const pointer = { x:-1, y:-1, inGraph:false };
+  function cpos(e){ const r = canvas.getBoundingClientRect(); return [ (e.clientX-r.left)*(W/r.width), (e.clientY-r.top)*(H/r.height) ]; }
+  canvas.addEventListener('pointermove', e => { const [mx,my]=cpos(e); pointer.x=mx; pointer.y=my; });
+  canvas.addEventListener('pointerleave', () => { pointer.x=-1; pointer.y=-1; });
+
+  // ════════════════════════════════════════════════════════════
+  //  RENDERING
+  // ════════════════════════════════════════════════════════════
+  const SCENE_H = 300;
+
+  // shrubs (food) — fixed layout, stable across frames
+  const shrubs = (() => {
+    let s = 1337; const r = () => { s=(s*1103515245+12345)&0x7fffffff; return s/0x7fffffff; };
+    const arr = [];
+    for (let i=0;i<11;i++){ const y=150+r()*130; arr.push({ x:30+r()*740, y, s:0.8+(y-150)/130*0.6 }); }
+    return arr.sort((a,b)=>a.y-b.y);
+  })();
+
+  function drawGround(){
+    if (habitat === 'equator'){
+      const g = ctx.createLinearGradient(0,0,0,SCENE_H);
+      g.addColorStop(0,'#caa06a'); g.addColorStop(0.32,'#a9794a'); g.addColorStop(1,'#7c552f');
+      ctx.fillStyle=g; ctx.fillRect(0,0,W,SCENE_H);
+      // rolling mounds
+      ctx.fillStyle='rgba(92,62,33,0.30)';
+      mound(120,118,260,46); mound(560,104,320,40);
+      ctx.fillStyle='rgba(150,118,76,0.30)';
+      mound(360,196,420,60); mound(40,250,300,70);
+      // pebbles
+      ctx.fillStyle='rgba(70,48,26,0.35)';
+      let s=7; const r=()=>{s=(s*16807)%2147483647; return s/2147483647;};
+      for(let i=0;i<46;i++){ const x=r()*W, y=120+r()*175; ctx.beginPath(); ctx.arc(x,y,1+r()*1.8,0,6.283); ctx.fill(); }
+    } else {
+      const g = ctx.createLinearGradient(0,0,0,SCENE_H);
+      g.addColorStop(0,'#cfe2ef'); g.addColorStop(0.4,'#e4eef6'); g.addColorStop(1,'#f6fbff');
+      ctx.fillStyle=g; ctx.fillRect(0,0,W,SCENE_H);
+      // snow drifts (bluish shadow)
+      ctx.fillStyle='rgba(173,199,224,0.45)';
+      mound(140,128,300,46); mound(600,150,340,52); mound(330,232,460,66);
+      ctx.fillStyle='rgba(255,255,255,0.65)';
+      mound(120,150,260,40); mound(560,180,320,46);
+      // sparkles
+      ctx.fillStyle='rgba(255,255,255,0.9)';
+      let s=11; const r=()=>{s=(s*16807)%2147483647; return s/2147483647;};
+      for(let i=0;i<40;i++){ const x=r()*W, y=120+r()*175; ctx.beginPath(); ctx.arc(x,y,0.8+r()*1.1,0,6.283); ctx.fill(); }
+    }
+  }
+  function mound(cx, cy, w, h){ ctx.beginPath(); ctx.ellipse(cx,cy,w/2,h,0,0,Math.PI*2); ctx.fill(); }
+
+  function drawShrub(sh){
+    const x=sh.x, y=sh.y, s=sh.s;
+    ctx.fillStyle='rgba(30,40,20,0.18)';
+    ctx.beginPath(); ctx.ellipse(x, y+6*s, 16*s, 4*s, 0,0,6.283); ctx.fill();
+    const blobs=[[-8,-1,8],[0,-7,9],[9,-2,8],[3,2,8],[-4,3,7]];
+    for (const [dx,dy,r] of blobs){ ctx.fillStyle='#3f8f3a'; ctx.beginPath(); ctx.arc(x+dx*s,y+dy*s,r*s,0,6.283); ctx.fill(); }
+    for (const [dx,dy,r] of blobs){ ctx.fillStyle='rgba(110,180,80,0.55)'; ctx.beginPath(); ctx.arc(x+dx*s-1.5*s,y+dy*s-1.5*s,r*0.45*s,0,6.283); ctx.fill(); }
+    ctx.fillStyle='#e0566a'; // berries
+    ctx.beginPath(); ctx.arc(x-3*s,y-3*s,1.4*s,0,6.283); ctx.arc(x+5*s,y-1*s,1.4*s,0,6.283); ctx.fill();
+  }
+
+  function drawEar(cx, cy, ang, sc, fill, stroke, inner){
+    ctx.save(); ctx.translate(cx,cy); ctx.rotate(ang);
+    ctx.fillStyle=fill; ctx.strokeStyle=stroke; ctx.lineWidth=1.2*sc;
+    ctx.beginPath(); ctx.ellipse(0,-7*sc,2.4*sc,7.2*sc,0,0,6.283); ctx.fill(); ctx.stroke();
+    ctx.fillStyle=inner; ctx.beginPath(); ctx.ellipse(0,-7*sc,1.1*sc,4.8*sc,0,0,6.283); ctx.fill();
+    ctx.restore();
+  }
+  function drawBunny(s){
+    const col = phenotype(s.geno), sc = s.scale, f = s.facing;
+    const hop = -s.hopH*Math.abs(Math.sin(s.t*s.hopSpeed + s.phase))*sc;
+    const cx = s.x, gy = s.y, cy = s.y + hop;
+    const fill   = col==='white' ? '#f6f8fa' : '#8a5a32';
+    const stroke = col==='white' ? '#97a4b3' : '#553318';
+    const inner  = col==='white' ? '#ecdfe1' : '#c79a86';
+    // shadow stays on the ground (sells the hop)
+    ctx.fillStyle='rgba(40,30,15,0.14)';
+    ctx.beginPath(); ctx.ellipse(cx, gy+9*sc, 12*sc, 3.6*sc, 0,0,6.283); ctx.fill();
+    // tail
+    ctx.fillStyle = col==='white' ? '#ffffff' : '#a87a52';
+    ctx.strokeStyle=stroke; ctx.lineWidth=1*sc;
+    ctx.beginPath(); ctx.arc(cx-10*sc*f, cy-1*sc, 3.3*sc, 0,6.283); ctx.fill(); ctx.stroke();
+    // body
+    ctx.fillStyle=fill; ctx.strokeStyle=stroke; ctx.lineWidth=1.5*sc;
+    ctx.beginPath(); ctx.ellipse(cx, cy, 11*sc, 8*sc, 0,0,6.283); ctx.fill(); ctx.stroke();
+    // head
+    const hx = cx + 9*sc*f, hy = cy - 5*sc;
+    const flop = Math.sin(s.t*s.hopSpeed + s.phase)*0.10;
+    drawEar(hx - 2.4*sc*f, hy - 3*sc, (-0.22 - flop)*f, sc, fill, stroke, inner);
+    drawEar(hx + 0.8*sc*f, hy - 3*sc, ( 0.12 - flop)*f, sc, fill, stroke, inner);
+    ctx.fillStyle=fill; ctx.strokeStyle=stroke; ctx.lineWidth=1.5*sc;
+    ctx.beginPath(); ctx.ellipse(hx, hy, 6*sc, 5.3*sc, 0,0,6.283); ctx.fill(); ctx.stroke();
+    // eye + nose
+    ctx.fillStyle='#23282e'; ctx.beginPath(); ctx.arc(hx + 2.4*sc*f, hy - 0.6*sc, 1.15*sc, 0,6.283); ctx.fill();
+    ctx.fillStyle='#d98a9a'; ctx.beginPath(); ctx.arc(hx + 5.4*sc*f, hy + 1.6*sc, 1.0*sc, 0,6.283); ctx.fill();
+    // front foot
+    ctx.fillStyle=fill; ctx.strokeStyle=stroke; ctx.lineWidth=1.2*sc;
+    ctx.beginPath(); ctx.ellipse(cx + 6*sc*f, cy + 7*sc, 4*sc, 2.4*sc, 0,0,6.283); ctx.fill(); ctx.stroke();
+  }
+
+  function drawScene(){
+    drawGround();
+    for (const sh of shrubs) drawShrub(sh);
+    const ordered = sprites.slice().sort((a,b)=>a.y-b.y);
+    for (const s of ordered) drawBunny(s);
+
+    // sample note
+    if (bunnies.length > SAMPLE_MAX){
+      ctx.fillStyle = habitat==='arctic' ? 'rgba(70,90,110,0.75)' : 'rgba(255,245,230,0.85)';
+      ctx.font = '11px Segoe UI'; ctx.textAlign='left';
+      ctx.fillText('showing '+SAMPLE_MAX+' of '+bunnies.length+' bunnies', 8, SCENE_H-8);
+    }
+
+    // allele peek on hovered bunny
+    if (pointer.y >= 0 && pointer.y < SCENE_H){
+      let best=null, bd=1e9;
+      for (const s of sprites){ const d=Math.hypot(pointer.x-s.x, pointer.y-s.y); if (d<bd){bd=d; best=s;} }
+      if (best && bd < 16){
+        const g = best.geno;
+        const al = a => a==='brown' ? (dominantColor==='brown'?'B':'b') : (dominantColor==='white'?'W':'w');
+        const txt = 'alleles  '+al(g.a)+' / '+al(g.b);
+        ctx.font='bold 11px Segoe UI'; const tw=ctx.measureText(txt).width;
+        let bx=best.x - tw/2 - 6, by=best.y - 30;
+        bx=Math.max(4, Math.min(W-tw-16, bx));
+        ctx.fillStyle='rgba(20,28,38,0.88)'; roundRect(bx, by, tw+12, 20, 5); ctx.fill();
+        ctx.fillStyle='#fff'; ctx.textAlign='left'; ctx.fillText(txt, bx+6, by+14);
+      }
+    }
+
+    // banners / hints
+    if (!hasMate && !ended){
+      banner('Click "Add a mate" to begin breeding.', '#fff', 'rgba(30,40,52,0.78)');
+    } else if (ended === 'takeover'){
+      banner('Bunnies have taken over the world!', '#fff', 'rgba(180,60,40,0.92)', true);
+    } else if (ended === 'extinct'){
+      banner('All of the bunnies have died.', '#fff', 'rgba(40,48,58,0.9)', true);
+    }
+  }
+  function banner(text, fg, bg, big){
+    ctx.font = (big?'bold 26px ':'600 16px ')+'Segoe UI'; ctx.textAlign='center';
+    const tw=ctx.measureText(text).width;
+    const bw=tw+44, bh=big?52:36, bx=(W-bw)/2, by=big?120:SCENE_H/2-bh/2;
+    ctx.fillStyle=bg; roundRect(bx,by,bw,bh,12); ctx.fill();
+    ctx.fillStyle=fg; ctx.fillText(text, W/2, by+bh/2 + (big?9:6));
+  }
+
+  // ── Graph + info panels ─────────────────────────────────────
+  const GR = { x:14, y:316, w:498, h:176 };
+  const IP = { x:524, y:316, w:262, h:176 };
+
+  function niceTop(v){
+    if (v<=10) return 10;
+    const p=Math.pow(10,Math.floor(Math.log10(v))), n=v/p;
+    const m = n<=1?1 : n<=2?2 : n<=5?5 : 10;
+    return m*p;
+  }
+  function panel(p){
+    ctx.fillStyle='#ffffff'; ctx.strokeStyle='#d4dae1'; ctx.lineWidth=1;
+    roundRect(p.x,p.y,p.w,p.h,8); ctx.fill(); ctx.stroke();
+  }
+
+  function drawGraph(){
+    panel(GR);
+    ctx.fillStyle='#3a4654'; ctx.font='bold 12.5px Segoe UI'; ctx.textAlign='left';
+    ctx.fillText('Population vs. Generation', GR.x+10, GR.y+16);
+
+    const gx0=GR.x+40, gx1=GR.x+GR.w-12, gy0=GR.y+26, gy1=GR.y+GR.h-22;
+    const last=generation, xmax=Math.max(8,last);
+    let maxT=10; for (let g=0; g<=last; g++) maxT=Math.max(maxT, phAt(g).t);
+    const ymax=niceTop(maxT);
+    const X=g => gx0 + (g/xmax)*(gx1-gx0);
+    const Yv=v => gy1 - (v/ymax)*(gy1-gy0);
+
+    // y gridlines + labels
+    ctx.textAlign='right'; ctx.font='10px Segoe UI';
+    for (let i=0;i<=4;i++){
+      const v=ymax*i/4, y=Yv(v);
+      ctx.strokeStyle='#eef1f4'; ctx.lineWidth=1;
+      ctx.beginPath(); ctx.moveTo(gx0,y); ctx.lineTo(gx1,y); ctx.stroke();
+      ctx.fillStyle='#8a96a3'; ctx.fillText(Math.round(v), gx0-5, y+3);
+    }
+    // takeover threshold
+    if (TAKEOVER<=ymax){
+      const y=Yv(TAKEOVER);
+      ctx.strokeStyle='#d98a2b'; ctx.setLineDash([5,4]); ctx.lineWidth=1.2;
+      ctx.beginPath(); ctx.moveTo(gx0,y); ctx.lineTo(gx1,y); ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle='#c97a1b'; ctx.font='9.5px Segoe UI'; ctx.textAlign='left';
+      ctx.fillText('takeover '+TAKEOVER, gx0+3, y-3);
+    }
+    // x ticks
+    ctx.textAlign='center'; ctx.fillStyle='#8a96a3'; ctx.font='10px Segoe UI';
+    const xstep = xmax>12 ? 2 : 1;
+    for (let g=0; g<=xmax; g+=xstep){ ctx.fillText(g, X(g), gy1+13); }
+    ctx.fillStyle='#5a6573'; ctx.fillText('generation', (gx0+gx1)/2, GR.y+GR.h-3);
+
+    // probe (hover) generation
+    let probe=-1;
+    if (pointer.x>=gx0-6 && pointer.x<=gx1+6 && pointer.y>=gy0-6 && pointer.y<=gy1+10){
+      probe=Math.round((pointer.x-gx0)/(gx1-gx0)*xmax);
+      probe=Math.max(0,Math.min(last,probe));
+    }
+    pointer.inGraph = probe>=0;
+    pointer.probeGen = probe;
+
+    // three series
+    const series=[['t','#33485f',3],['w','#5d86b3',2],['b','#8a5a32',2]];
+    for (const [key,color,wd] of series){
+      ctx.strokeStyle=color; ctx.lineWidth=wd; ctx.beginPath();
+      for (let g=0; g<=last; g++){ const v=phAt(g)[key]; const x=X(g), y=Yv(v); g===0?ctx.moveTo(x,y):ctx.lineTo(x,y); }
+      ctx.stroke();
+      ctx.fillStyle=color;
+      for (let g=0; g<=last; g++){ const v=phAt(g)[key]; ctx.beginPath(); ctx.arc(X(g),Yv(v), g===probe?3.6:2.2, 0,6.283); ctx.fill(); }
+    }
+    // probe marker
+    if (probe>=0){
+      ctx.strokeStyle='rgba(80,96,112,0.5)'; ctx.lineWidth=1; ctx.setLineDash([3,3]);
+      ctx.beginPath(); ctx.moveTo(X(probe),gy0); ctx.lineTo(X(probe),gy1); ctx.stroke(); ctx.setLineDash([]);
+    }
+    // legend
+    const lg=[['Total','#33485f'],['White fur','#5d86b3'],['Brown fur','#8a5a32']];
+    let lx=gx1-188; ctx.textAlign='left'; ctx.font='10px Segoe UI';
+    for (const [t,c] of lg){
+      ctx.strokeStyle=c; ctx.lineWidth=2.4; ctx.beginPath(); ctx.moveTo(lx,gy0-1); ctx.lineTo(lx+16,gy0-1); ctx.stroke();
+      ctx.fillStyle='#5a6573'; ctx.fillText(t, lx+20, gy0+2); lx += ctx.measureText(t).width+34;
+    }
+  }
+
+  function drawInfo(){
+    panel(IP);
+    const x=IP.x+12; let y=IP.y+22;
+    const useProbe = pointer.inGraph && pointer.probeGen>=0;
+    const g = useProbe ? pointer.probeGen : generation;
+    const p = phAt(g);
+
+    ctx.textAlign='left';
+    ctx.fillStyle='#3a4654'; ctx.font='bold 13px Segoe UI';
+    ctx.fillText(useProbe ? ('Data probe — Gen '+g) : ('Generation '+g), x, y);
+    y+=10;
+    ctx.strokeStyle='#e4e8ec'; ctx.beginPath(); ctx.moveTo(x,y); ctx.lineTo(IP.x+IP.w-12,y); ctx.stroke();
+    y+=22;
+
+    const rows=[['Total population', p.t, '#33485f'], ['White fur', p.w, '#5d86b3'], ['Brown fur', p.b, '#8a5a32']];
+    ctx.font='13px Segoe UI';
+    for (const [label,val,col] of rows){
+      ctx.fillStyle=col; ctx.beginPath(); ctx.arc(x+5,y-4,5,0,6.283); ctx.fill();
+      ctx.fillStyle='#3a4654'; ctx.fillText(label, x+16, y);
+      ctx.textAlign='right'; ctx.font='bold 14px Segoe UI';
+      ctx.fillText(val, IP.x+IP.w-14, y);
+      ctx.textAlign='left'; ctx.font='13px Segoe UI';
+      y+=25;
+    }
+    y+=4;
+    ctx.strokeStyle='#e4e8ec'; ctx.beginPath(); ctx.moveTo(x,y); ctx.lineTo(IP.x+IP.w-12,y); ctx.stroke();
+    y+=20;
+    ctx.fillStyle='#5a6573'; ctx.font='11.5px Segoe UI';
+    const camo = habitat==='equator' ? 'brown' : 'white';
+    ctx.fillText('Habitat: '+(habitat==='equator'?'Equator (brown ground)':'Arctic (snow)'), x, y); y+=18;
+    ctx.fillText('Camouflaged fur: '+camo, x, y); y+=18;
+    ctx.fillStyle='#8a96a3'; ctx.font='11px Segoe UI';
+    ctx.fillText('Dominant: '+dominantColor+(mutationAdded?'':'  (no mutation yet)'), x, y);
+  }
+
+  function roundRect(x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+
+  function draw(){
+    ctx.clearRect(0,0,W,H);
+    // separator strip under the scene
+    ctx.fillStyle='#eef1f4'; ctx.fillRect(0,SCENE_H,W,H-SCENE_H);
+    ctx.strokeStyle='#d4dae1'; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(0,SCENE_H+0.5); ctx.lineTo(W,SCENE_H+0.5); ctx.stroke();
+    ctx.save(); ctx.beginPath(); ctx.rect(0,0,W,SCENE_H); ctx.clip(); drawScene(); ctx.restore();
+    drawGraph();
+    drawInfo();
+  }
+
+  // ── Animation loop ──────────────────────────────────────────
+  function updateSprites(dt){
+    for (const s of sprites){
+      s.t += dt;
+      s.x += s.vx*dt;
+      if (s.x < 28){ s.x=28; s.vx=Math.abs(s.vx); s.facing=1; }
+      if (s.x > W-28){ s.x=W-28; s.vx=-Math.abs(s.vx); s.facing=-1; }
+    }
+  }
+  let lastTs=0;
+  function frame(ts){
+    if (!lastTs) lastTs=ts;
+    const dt=Math.min((ts-lastTs)/1000, 0.05); lastTs=ts;
+    if (running && hasMate && !ended){
+      acc += dt*(fast?FAST_MULT:1);
+      let guard=0;
+      while (acc >= GEN_PERIOD && !ended && guard<5){ acc-=GEN_PERIOD; step(); guard++; }
+    }
+    updateSprites(dt);
+    draw();
+    requestAnimationFrame(frame);
+  }
+
+  // ════════════════════════════════════════════════════════════
+  //  CONTROLS
+  // ════════════════════════════════════════════════════════════
+  const $ = id => document.getElementById(id);
+  const segHabitat=$('segHabitat'), segDom=$('segDom');
+  const btnMate=$('btnMate'), btnPlay=$('btnPlay'), btnFF=$('btnFF'),
+        btnMutate=$('btnMutate'), btnReset=$('btnReset'),
+        chkWolves=$('chkWolves'), chkFood=$('chkFood'), speedNote=$('speedNote');
+
+  function setSeg(seg, val){ for (const b of seg.children) b.classList.toggle('on', b.dataset.v===val); }
+  function syncUI(){
+    setSeg(segHabitat, habitat); setSeg(segDom, dominantColor);
+    chkWolves.checked=wolves; chkFood.checked=food;
+    btnMate.disabled = hasMate || !!ended;
+    btnMutate.disabled = mutationAdded || !!ended || bunnies.length===0;
+    btnPlay.disabled = !hasMate || !!ended;
+    btnPlay.textContent = running ? 'Pause' : 'Play';
+    btnFF.classList.toggle('on', fast);
+    speedNote.textContent = ended ? '' : (hasMate ? ('1 generation ≈ '+(GEN_PERIOD/(fast?FAST_MULT:1)).toFixed(fast?1:0)+' s') : '');
+  }
+
+  segHabitat.addEventListener('click', e => { const v=e.target.dataset.v; if(!v)return; habitat=v; syncUI(); });
+  segDom.addEventListener('click', e => { const v=e.target.dataset.v; if(!v)return; dominantColor=v; syncUI(); });
+  chkWolves.addEventListener('change', () => { wolves=chkWolves.checked; });
+  chkFood.addEventListener('change',  () => { food=chkFood.checked; });
+  btnMate.addEventListener('click', addMate);
+  btnMutate.addEventListener('click', addMutation);
+  btnPlay.addEventListener('click', () => { if(!hasMate||ended)return; running=!running; syncUI(); });
+  btnFF.addEventListener('click', () => { fast=!fast; syncUI(); });
+  btnReset.addEventListener('click', fullReset);
+
+  // ── Boot ────────────────────────────────────────────────────
+  initSim();
+  const wantRun = intOr(Q.get('run'), 0);
+  if (truthy(Q.get('mate')) || wantRun>0) addMate();
+  if (truthy(Q.get('mutate'))) addMutation();
+  if (Q.get('speed')==='fast') fast=true;
+  if (wantRun>0){ runTo(wantRun); running=false; }
+  else running = hasMate && !truthy(Q.get('paused'));
+  syncUI();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
