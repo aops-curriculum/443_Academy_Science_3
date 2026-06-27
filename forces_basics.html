@@ -39,7 +39,7 @@
   </style>
 </head>
 <body>
-  <canvas id="c" width="800" height="460"></canvas>
+  <div id="cwrap"><canvas id="c" width="800" height="460"></canvas></div>
   <div id="tabs">
     <button class="tab" id="tabTug">Tug of War</button>
     <button class="tab" id="tabMotion">Motion</button>
@@ -51,7 +51,6 @@
     const W = 800, H = 460;
     const dpr = window.devicePixelRatio || 1;
     canvas.width = W * dpr; canvas.height = H * dpr;
-    canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
     ctx.scale(dpr, dpr);
     const qp = new URLSearchParams(location.search);
     let screen = qp.get('screen') === 'motion' ? 'motion' : 'tug';
